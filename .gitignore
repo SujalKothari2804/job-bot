@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Database files
+*.db
+*.sqlite3
+
+# Credentials & environment files
+.env
+.env.*
+!.env.example
+
+# Telegram session files
+*.session
+*.session-journal
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS & system files
+.DS_Store
+Thumbs.db
