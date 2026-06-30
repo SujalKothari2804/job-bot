@@ -240,14 +240,14 @@ async def handle_message(event, source_key: str):
     await asyncio.sleep(2)
 
 
-@userbot.on(events.NewMessage(chats=SOURCE_CHANNEL_1))
-async def on_source1(event):
-    await handle_message(event, "source1")
-
-
-@userbot.on(events.NewMessage(chats=SOURCE_CHANNEL_2))
-async def on_source2(event):
-    await handle_message(event, "source2")
+@userbot.on(events.NewMessage())
+async def on_any_message(event):
+    """Catch-all handler — filter by chat_id to avoid entity resolution errors."""
+    chat_id = event.chat_id
+    if chat_id == SOURCE_CHANNEL_1:
+        await handle_message(event, "source1")
+    elif chat_id == SOURCE_CHANNEL_2:
+        await handle_message(event, "source2")
 
 
 async def main():
@@ -256,25 +256,14 @@ async def main():
     me = await userbot.get_me()
     print(f"✅ Connected as: {me.first_name} (@{me.username})")
 
-    # Pre-resolve entities so Telethon caches them before event handlers fire
-    try:
-        await userbot.get_entity(SOURCE_CHANNEL_1)
-        print(f"📡 Source 1 resolved: {SOURCE_CHANNEL_1}")
-    except Exception as e:
-        print(f"⚠️  Could not resolve Source 1 ({SOURCE_CHANNEL_1}): {e}")
+    # Populate entity cache so send_message to YOUR_CHANNEL works
+    print("🔄 Loading dialogs to populate entity cache...")
+    await userbot.get_dialogs()
+    print("✅ Dialogs loaded")
 
-    try:
-        await userbot.get_entity(SOURCE_CHANNEL_2)
-        print(f"📡 Source 2 resolved: {SOURCE_CHANNEL_2}")
-    except Exception as e:
-        print(f"⚠️  Could not resolve Source 2 ({SOURCE_CHANNEL_2}): {e}")
-
-    try:
-        await userbot.get_entity(YOUR_CHANNEL)
-        print(f"📤 Destination resolved: {YOUR_CHANNEL}")
-    except Exception as e:
-        print(f"⚠️  Could not resolve destination ({YOUR_CHANNEL}): {e}")
-
+    print(f"📡 Source 1: {SOURCE_CHANNEL_1}")
+    print(f"📡 Source 2: {SOURCE_CHANNEL_2}")
+    print(f"📤 Posting to: {YOUR_CHANNEL}")
     print(f"🤖 Models (fallback order): {', '.join(MODELS)}")
     print(f"⏳ Waiting for messages...\n")
     await userbot.run_until_disconnected()
