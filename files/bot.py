@@ -40,6 +40,16 @@ post_counts = {"source1": 0, "source2": 0}
 last_reset = datetime.now().date()
 
 
+def normalize_id(raw_id: int) -> int:
+    """Normalize Telegram channel ID to always include the -100 prefix.
+    Telethon sometimes omits it depending on the update type.
+    """
+    s = str(raw_id)
+    if s.startswith("-100"):
+        return raw_id
+    return int(f"-100{abs(raw_id)}")
+
+
 def reset_daily_counts():
     global last_reset
     today = datetime.now().date()
@@ -242,11 +252,13 @@ async def handle_message(event, source_key: str):
 
 @userbot.on(events.NewMessage())
 async def on_any_message(event):
-    """Catch-all handler — filter by chat_id to avoid entity resolution errors."""
-    chat_id = event.chat_id
-    if chat_id == SOURCE_CHANNEL_1:
+    """Catch-all handler — filter by normalized chat_id to avoid entity resolution
+    errors and handle Telethon's inconsistent -100 prefix behaviour.
+    """
+    chat_id = normalize_id(event.chat_id)
+    if chat_id == normalize_id(SOURCE_CHANNEL_1):
         await handle_message(event, "source1")
-    elif chat_id == SOURCE_CHANNEL_2:
+    elif chat_id == normalize_id(SOURCE_CHANNEL_2):
         await handle_message(event, "source2")
 
 
