@@ -22,9 +22,9 @@ load_dotenv()
 API_ID            = int(os.getenv("TG_API_ID"))
 API_HASH          = os.getenv("TG_API_HASH")
 PHONE             = os.getenv("TG_PHONE")
-SOURCE_CHANNEL_1  = os.getenv("TG_SOURCE_1")
-SOURCE_CHANNEL_2  = os.getenv("TG_SOURCE_2")
-YOUR_CHANNEL      = os.getenv("TG_YOUR_CHANNEL")
+SOURCE_CHANNEL_1  = int(os.getenv("TG_SOURCE_1"))
+SOURCE_CHANNEL_2  = int(os.getenv("TG_SOURCE_2"))
+YOUR_CHANNEL      = int(os.getenv("TG_YOUR_CHANNEL"))
 USERBOT_SESSION   = os.getenv("TG_USERBOT_SESSION", "")
 OPENROUTER_KEY    = os.getenv("OPENROUTER_API_KEY")
 
@@ -255,9 +255,26 @@ async def main():
     await userbot.start()
     me = await userbot.get_me()
     print(f"✅ Connected as: {me.first_name} (@{me.username})")
-    print(f"📡 Source 1: {SOURCE_CHANNEL_1}")
-    print(f"📡 Source 2: {SOURCE_CHANNEL_2}")
-    print(f"📤 Posting to: {YOUR_CHANNEL}")
+
+    # Pre-resolve entities so Telethon caches them before event handlers fire
+    try:
+        await userbot.get_entity(SOURCE_CHANNEL_1)
+        print(f"📡 Source 1 resolved: {SOURCE_CHANNEL_1}")
+    except Exception as e:
+        print(f"⚠️  Could not resolve Source 1 ({SOURCE_CHANNEL_1}): {e}")
+
+    try:
+        await userbot.get_entity(SOURCE_CHANNEL_2)
+        print(f"📡 Source 2 resolved: {SOURCE_CHANNEL_2}")
+    except Exception as e:
+        print(f"⚠️  Could not resolve Source 2 ({SOURCE_CHANNEL_2}): {e}")
+
+    try:
+        await userbot.get_entity(YOUR_CHANNEL)
+        print(f"📤 Destination resolved: {YOUR_CHANNEL}")
+    except Exception as e:
+        print(f"⚠️  Could not resolve destination ({YOUR_CHANNEL}): {e}")
+
     print(f"🤖 Models (fallback order): {', '.join(MODELS)}")
     print(f"⏳ Waiting for messages...\n")
     await userbot.run_until_disconnected()
