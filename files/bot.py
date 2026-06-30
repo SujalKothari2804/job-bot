@@ -29,9 +29,10 @@ USERBOT_SESSION   = os.getenv("TG_USERBOT_SESSION", "")
 OPENROUTER_KEY    = os.getenv("OPENROUTER_API_KEY")
 
 MODELS = [
-    "google/gemini-2.0-flash-exp:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
+    "openrouter/free",                          # auto-selects best available free model
+    "qwen/qwen3-8b:free",                       # fallback 1
+    "deepseek/deepseek-chat-v3-0324:free",      # fallback 2
+    "meta-llama/llama-3.3-70b-instruct:free",   # fallback 3
 ]
 
 userbot = TelegramClient(StringSession(USERBOT_SESSION), API_ID, API_HASH)
