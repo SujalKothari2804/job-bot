@@ -121,35 +121,46 @@ Answer (POST or SKIP):"""
 
 
 # ── Format the job post ───────────────────────────────────────────────────────
-async def format_job(text: str) -> str:
+# ── Source 1 formatter: keep structure, paraphrase the about/description ─────
+async def format_job_source1(text: str) -> str:
     prompt = f"""You are formatting a job post for ReferJobs Telegram channel.
 
-OUTPUT FORMAT (follow exactly, no deviations):
+The post already has a structured format. Keep ALL fields exactly as they are — company, role, location, batch, salary, experience, HR contact, walk-in info, etc.
 
-🚨🔥 FREE REFERRAL ALERT / HIRING ALERT 🔥🚨
+Your ONLY job is:
+- If the post has an "about" section or a descriptive paragraph about the role, rewrite it in your own words (paraphrase it). Keep the meaning the same but change the wording.
+- If there is no about/description section, output the post exactly as-is.
+- Remove ALL links or mentions of other Telegram channels, WhatsApp groups, or social media pages — these are source channel promotions and must be stripped completely.
 
-🏢 Company: [Company Name]
-💼 Role: [Job Title]
-📍 Location: [City or "Not mentioned"]
-🎓 Batch: [Year(s) or "Open for all"]
-💰 Salary/Stipend: [Amount or "Not mentioned"]
+Do NOT change any structured fields (company name, salary, location, role, etc.).
+Do NOT add or remove any fields.
+Do NOT add hashtags, preamble, or explanation.
+Output ONLY the final post.
 
-About the role:
-[Write 2-3 sentences paraphrasing what the job involves, skills needed, and what the candidate will work on. Use your own words. Do not copy paste from the original.]
+Job post:
+{text}"""
 
-🔗 Apply: [email address or URL]
+    return await call_ai(prompt)
 
-STRICT RULES — follow every single one without exception:
-1. Output ONLY the formatted post. No thinking, no explanation, no reasoning, no preamble, no notes.
-2. ONLY use information that is explicitly present in the original message. Do NOT invent, guess, or assume any detail (company name, salary, location, batch, apply link). If a field is missing, write "Not mentioned".
-3. Remove ALL links or mentions of other Telegram channels, WhatsApp groups, or social media pages from the output — these are source channel promotions and must be stripped completely.
-4. The apply link must ONLY be the actual job application link or email from the post. Never use a Telegram channel invite link as the apply link.
-5. If multiple jobs exist in the message, format each one separately using this full format (including the 🚨🔥 header), divided by: ──────────
-6. Do not add hashtags.
-7. Do not add any text before or after the formatted post(s).
-8. If apply link is missing, write: Not available
 
-Job post to format:
+# ── Source 2 formatter: keep post as-is, only strip channel promos ────────────
+async def format_job_source2(text: str) -> str:
+    prompt = f"""You are cleaning a job post for ReferJobs Telegram channel.
+
+Keep the entire post EXACTLY as it is — every field, every emoji, every line.
+
+Your ONLY job is to remove:
+- Any "Join us", "Follow us", "Subscribe", "Check out" type lines
+- Any Telegram channel links (t.me/...)
+- Any WhatsApp group or channel links (whatsapp.com/...)
+- Any Instagram, Twitter, LinkedIn, or other social media links
+- Any footer or bottom section that promotes another channel
+
+Do NOT change anything else — not the job details, not the formatting, not the emojis.
+Do NOT add hashtags, preamble, or explanation.
+Output ONLY the cleaned post.
+
+Job post:
 {text}"""
 
     return await call_ai(prompt)
@@ -176,9 +187,12 @@ async def process_message(text: str, source: str):
         print(f"  → Skipped (not a job post)")
         return
 
-    # Step 2 — Format
-    print(f"  → Formatting...")
-    formatted = await format_job(text)
+    # Step 2 — Format (strategy depends on source)
+    print(f"  → Formatting ({source})...")
+    if source == "source1":
+        formatted = await format_job_source1(text)
+    else:
+        formatted = await format_job_source2(text)
 
     # Step 3 — Post
     await post_to_channel(formatted)
