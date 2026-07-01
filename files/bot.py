@@ -156,7 +156,7 @@ INLINE_REMOVE_PATTERNS = [
     re.compile(r'https?://linkedin\.com/company/\S+', re.IGNORECASE),
 ]
 
-HEADER = "🚨🔥 FREE REFERRAL ALERT / HIRING ALERT 🔥🚨"
+HEADER = "ReferJobs - Find Refer Grow"
 
 
 def clean_message(text: str) -> str:
