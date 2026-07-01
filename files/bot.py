@@ -2,12 +2,13 @@
 ReferJobs Bot — Production Ready
 - Source 1: polling every 60s (handles private/restricted channels)
 - Source 2: event-based with queue (handles bulk messages without drops)
-- Simplified formatter: clean paraphrase, no hashtags, no promo links
-- Smart skip logic: skips non-job posts
+- No AI formatter: posts original text, strips branding/promo via regex
+- AI used ONLY for SKIP/POST filter
 - openrouter/free as primary model (auto-selects best available)
 """
 
 import asyncio
+import re
 import os
 import aiohttp
 from telethon import TelegramClient, events
@@ -102,13 +103,14 @@ Answer POST or SKIP only. No explanation. No other words.
 POST if:
 - Message contains a real job opening with role, company, or apply details
 - Message is a referral alert or hiring announcement for job seekers
-- Message has an apply link, email, or job form link
+- Message has a direct apply link, email, or job application form link
 
 SKIP if:
-- Message asks community to share screenshots or emails
-- Message asks users to DM someone for a referral contact
-- Message is a conversation or reply between people
-- Message is promoting another channel (join us, follow us)
+- Message asks users to fill a form and they will GET a referral in return (this is not a job post, it is a referral service)
+- Message asks users to DM someone to get a referral (e.g. "DM me for referral", "comment your resume")
+- Message asks the community to share screenshots, resumes, or emails with the poster
+- Message is promoting another Telegram channel, WhatsApp group, or social media page
+- Message is a conversation, reply, or reaction between people
 - Message has no actionable job information
 
 Message:
@@ -120,50 +122,64 @@ Answer (POST or SKIP):"""
     return result.strip().upper().startswith("POST")
 
 
-# ── Format the job post ───────────────────────────────────────────────────────
-# ── Source 1 formatter: keep structure, paraphrase the about/description ─────
-async def format_job_source1(text: str) -> str:
-    prompt = f"""You are formatting a job post for ReferJobs Telegram channel.
+# ── Regex-based message cleaner (no AI) ──────────────────────────────────────
+# Patterns matched LINE BY LINE — any line matching gets dropped entirely
+LINE_REMOVE_PATTERNS = [
+    re.compile(r'https?://t\.me/\S+', re.IGNORECASE),           # t.me links
+    re.compile(r'\bt\.me/\S+', re.IGNORECASE),                   # t.me without http
+    re.compile(r'https?://wa\.me/\S+', re.IGNORECASE),           # WhatsApp wa.me
+    re.compile(r'https?://chat\.whatsapp\.com/\S+', re.IGNORECASE),  # WhatsApp groups
+    re.compile(r'join (our|the|us|this)\b', re.IGNORECASE),      # "join our channel"
+    re.compile(r'follow (us|our|me)\b', re.IGNORECASE),          # "follow us on"
+    re.compile(r'subscribe (to|our|now)\b', re.IGNORECASE),      # "subscribe to"
+    re.compile(r'for (more|daily|latest|free|regular) (jobs?|updates?|opportunities?|alerts?|referrals?)', re.IGNORECASE),
+    re.compile(r'(click|tap) (here|the link|below|above)', re.IGNORECASE),
+    re.compile(r'forward (this|to your)', re.IGNORECASE),
+    re.compile(r'share (this|with your|in your)', re.IGNORECASE),
+    re.compile(r'powered by\b', re.IGNORECASE),
+    re.compile(r'brought to you by\b', re.IGNORECASE),
+    re.compile(r'^\s*@[A-Za-z0-9_]+\s*$'),                       # line is just a @handle
+    re.compile(r'(channel|group|community)\s*[:\-]\s*@[A-Za-z0-9_]+', re.IGNORECASE),
+    re.compile(r'source\s*[:\-]\s*@[A-Za-z0-9_]+', re.IGNORECASE),
+    re.compile(r'via\s+@[A-Za-z0-9_]+', re.IGNORECASE),
+]
 
-The post already has a structured format. Keep ALL fields exactly as they are — company, role, location, batch, salary, experience, HR contact, walk-in info, etc.
+# Inline patterns — strip the match but keep the rest of the line
+INLINE_REMOVE_PATTERNS = [
+    re.compile(r'https?://t\.me/\S+', re.IGNORECASE),
+    re.compile(r'\bt\.me/\S+', re.IGNORECASE),
+    re.compile(r'https?://wa\.me/\S+', re.IGNORECASE),
+    re.compile(r'https?://chat\.whatsapp\.com/\S+', re.IGNORECASE),
+    re.compile(r'https?://instagram\.com/\S+', re.IGNORECASE),
+    re.compile(r'https?://twitter\.com/\S+', re.IGNORECASE),
+    re.compile(r'https?://x\.com/\S+', re.IGNORECASE),
+    re.compile(r'https?://linkedin\.com/company/\S+', re.IGNORECASE),
+]
 
-Your ONLY job is:
-- If the post has an "about" section or a descriptive paragraph about the role, rewrite it in your own words (paraphrase it). Keep the meaning the same but change the wording.
-- If there is no about/description section, output the post exactly as-is.
-- Remove ALL links or mentions of other Telegram channels, WhatsApp groups, or social media pages — these are source channel promotions and must be stripped completely.
-
-Do NOT change any structured fields (company name, salary, location, role, etc.).
-Do NOT add or remove any fields.
-Do NOT add hashtags, preamble, or explanation.
-Output ONLY the final post.
-
-Job post:
-{text}"""
-
-    return await call_ai(prompt)
+HEADER = "🚨🔥 FREE REFERRAL ALERT / HIRING ALERT 🔥🚨"
 
 
-# ── Source 2 formatter: keep post as-is, only strip channel promos ────────────
-async def format_job_source2(text: str) -> str:
-    prompt = f"""You are cleaning a job post for ReferJobs Telegram channel.
+def clean_message(text: str) -> str:
+    """
+    Clean a job post by removing channel branding and promo content.
+    No AI involved — pure regex. Fast and deterministic.
+    """
+    lines = text.split('\n')
+    cleaned = []
 
-Keep the entire post EXACTLY as it is — every field, every emoji, every line.
+    for line in lines:
+        # Drop the whole line if it matches a promo pattern
+        if any(p.search(line) for p in LINE_REMOVE_PATTERNS):
+            continue
+        # Strip inline promo links from lines that have other content too
+        for p in INLINE_REMOVE_PATTERNS:
+            line = p.sub('', line)
+        cleaned.append(line)
 
-Your ONLY job is to remove:
-- Any "Join us", "Follow us", "Subscribe", "Check out" type lines
-- Any Telegram channel links (t.me/...)
-- Any WhatsApp group or channel links (whatsapp.com/...)
-- Any Instagram, Twitter, LinkedIn, or other social media links
-- Any footer or bottom section that promotes another channel
-
-Do NOT change anything else — not the job details, not the formatting, not the emojis.
-Do NOT add hashtags, preamble, or explanation.
-Output ONLY the cleaned post.
-
-Job post:
-{text}"""
-
-    return await call_ai(prompt)
+    result = '\n'.join(cleaned)
+    # Collapse 3+ consecutive blank lines into 2
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    return result.strip()
 
 
 # ── Post to ReferJobs channel ─────────────────────────────────────────────────
@@ -174,28 +190,28 @@ async def post_to_channel(formatted: str):
 
 # ── Process a single message ──────────────────────────────────────────────────
 async def process_message(text: str, source: str):
-    """Full pipeline: filter → format → post."""
+    """Full pipeline: filter → clean → post. No AI formatting."""
     text = text.strip()
     if not text:
         return
 
     print(f"\n[{source}] New message: {text[:80]}...")
 
-    # Step 1 — Filter
+    # Step 1 — AI filter (POST or SKIP)
     should = await should_post(text)
     if not should:
         print(f"  → Skipped (not a job post)")
         return
 
-    # Step 2 — Format (strategy depends on source)
-    print(f"  → Formatting ({source})...")
-    if source == "source1":
-        formatted = await format_job_source1(text)
-    else:
-        formatted = await format_job_source2(text)
+    # Step 2 — Regex clean (strip branding, promo links)
+    cleaned = clean_message(text)
+    if not cleaned:
+        print(f"  → Skipped (nothing left after cleaning)")
+        return
 
-    # Step 3 — Post
-    await post_to_channel(formatted)
+    # Step 3 — Add header and post
+    final = f"{HEADER}\n\n{cleaned}"
+    await post_to_channel(final)
 
     # Brief delay to respect Telegram flood limits
     await asyncio.sleep(3)
