@@ -197,16 +197,16 @@ async def process_message(text: str, source: str):
 
     print(f"\n[{source}] New message: {text[:80]}...")
 
-    # Step 1 — AI filter (POST or SKIP)
-    should = await should_post(text)
-    if not should:
-        print(f"  → Skipped (not a job post)")
-        return
-
-    # Step 2 — Regex clean (strip branding, promo links)
+    # Step 1 — Regex clean (strip branding, promo links BEFORE AI sees it)
     cleaned = clean_message(text)
     if not cleaned:
         print(f"  → Skipped (nothing left after cleaning)")
+        return
+
+    # Step 2 — AI filter on clean text only (POST or SKIP)
+    should = await should_post(cleaned)
+    if not should:
+        print(f"  → Skipped (not a job post)")
         return
 
     # Step 3 — Add header and post
