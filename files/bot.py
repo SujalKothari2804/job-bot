@@ -126,25 +126,28 @@ async def format_job(text: str) -> str:
 
 OUTPUT FORMAT (follow exactly, no deviations):
 
-🚀 [Job Title] at [Company Name]
+🚨🔥 FREE REFERRAL ALERT / HIRING ALERT 🔥🚨
 
-📍 [City/Location]
-🎓 Batch: [Year or "Open for all"]
-💰 Stipend/Salary: [Amount or "Not mentioned"]
+🏢 Company: [Company Name]
+💼 Role: [Job Title]
+📍 Location: [City or "Not mentioned"]
+🎓 Batch: [Year(s) or "Open for all"]
+💰 Salary/Stipend: [Amount or "Not mentioned"]
 
 About the role:
 [Write 2-3 sentences paraphrasing what the job involves, skills needed, and what the candidate will work on. Use your own words. Do not copy paste from the original.]
 
 🔗 Apply: [email address or URL]
 
-STRICT RULES — follow these without exception:
-1. Output ONLY the formatted post. No thinking, no explanation, no reasoning, no notes.
-2. Remove ALL links or mentions of other Telegram channels, WhatsApp groups, or social media pages. These are promotions from the source and must be stripped completely.
-3. The apply link must ONLY be the actual job application link or email. Never a channel invite link.
-4. If multiple jobs exist in the message, format each one separately, divided by: ──────────
-5. Do not add hashtags.
-6. Do not add any text before or after the formatted post(s).
-7. If apply link is missing write: Not available
+STRICT RULES — follow every single one without exception:
+1. Output ONLY the formatted post. No thinking, no explanation, no reasoning, no preamble, no notes.
+2. ONLY use information that is explicitly present in the original message. Do NOT invent, guess, or assume any detail (company name, salary, location, batch, apply link). If a field is missing, write "Not mentioned".
+3. Remove ALL links or mentions of other Telegram channels, WhatsApp groups, or social media pages from the output — these are source channel promotions and must be stripped completely.
+4. The apply link must ONLY be the actual job application link or email from the post. Never use a Telegram channel invite link as the apply link.
+5. If multiple jobs exist in the message, format each one separately using this full format (including the 🚨🔥 header), divided by: ──────────
+6. Do not add hashtags.
+7. Do not add any text before or after the formatted post(s).
+8. If apply link is missing, write: Not available
 
 Job post to format:
 {text}"""
