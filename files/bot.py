@@ -142,6 +142,7 @@ LINE_REMOVE_PATTERNS = [
     re.compile(r'(channel|group|community)\s*[:\-]\s*@[A-Za-z0-9_]+', re.IGNORECASE),
     re.compile(r'source\s*[:\-]\s*@[A-Za-z0-9_]+', re.IGNORECASE),
     re.compile(r'via\s+@[A-Za-z0-9_]+', re.IGNORECASE),
+    re.compile(r'original\s+source\s*[:\-].*', re.IGNORECASE),   # "Original source: SDE Jobs and Internships"
 ]
 
 # Inline patterns — strip the match but keep the rest of the line
