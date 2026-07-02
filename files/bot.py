@@ -5,6 +5,12 @@ ReferJobs Bot — Production Ready
 - No AI formatter: posts original text, strips branding/promo via regex
 - AI used ONLY for SKIP/POST filter
 - openrouter/free as primary model (auto-selects best available)
+
+Fixes applied:
+- Source 2 event handler scoped directly via chats=[SOURCE_CHANNEL_2] (no more normalize_id fragility)
+- incoming=True added to avoid catching outgoing messages
+- 30s aiohttp timeout added to prevent queue stalls on hung AI requests
+- Debug logging improved for Source 2
 """
 
 import asyncio
@@ -44,26 +50,15 @@ last_seen_id = {"source1": 0}
 message_queue = asyncio.Queue()
 
 
-# ── ID normalizer (defined once, used in event handler) ──────────────────────
-def normalize_id(cid: int) -> int:
-    """
-    Normalize Telegram channel ID for comparison.
-    Strips the -100 prefix to get the raw channel ID.
-    Handles both forms Telethon may return.
-    """
-    s = str(abs(cid))
-    if s.startswith("100"):
-        s = s[3:]
-    return int(s)
-
 
 # ── OpenRouter AI call ────────────────────────────────────────────────────────
 async def call_ai(prompt: str) -> str:
     """Call OpenRouter with model fallback."""
     last_error = None
+    timeout = aiohttp.ClientTimeout(total=30)  # Prevent queue stall on hung requests
     for model in MODELS:
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
                     "https://openrouter.ai/api/v1/chat/completions",
                     headers={
@@ -276,16 +271,20 @@ async def poll_source1():
 
 
 # ── Source 2: Event-based ─────────────────────────────────────────────────────
-@userbot.on(events.NewMessage())
+# chats=[SOURCE_CHANNEL_2] → Telethon filters at library level (no ID comparison fragility)
+# incoming=True → skip outgoing messages sent by the userbot itself
+@userbot.on(events.NewMessage(chats=[SOURCE_CHANNEL_2], incoming=True))
 async def on_new_message(event):
-    """Catch-all handler — routes Source 2 messages to queue."""
+    """Source 2 handler — routes incoming messages to the processing queue."""
     try:
-        if normalize_id(event.chat_id) == normalize_id(SOURCE_CHANNEL_2):
-            text = event.message.text or event.message.caption or ""
-            if text.strip():
-                await message_queue.put((text, "source2"))
+        text = event.message.text or event.message.caption or ""
+        if text.strip():
+            print(f"[Source2] 📥 Received message (id={event.message.id}): {text[:60]}...")
+            await message_queue.put((text, "source2"))
+        else:
+            print(f"[Source2] ⏭ Skipped (media-only, no text, id={event.message.id})")
     except Exception as e:
-        print(f"[Source2] Event error: {e}")
+        print(f"[Source2] ❌ Event error (id={event.message.id}): {e}")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
