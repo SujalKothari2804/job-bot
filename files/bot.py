@@ -1,23 +1,25 @@
 """
-ReferJobs Bot — Production Ready
-- Source 1: polling every 60s (handles private/restricted channels)
-- Source 2: event-based with queue (handles bulk messages without drops)
-- No AI formatter: posts original text, strips branding/promo via regex
-- AI used ONLY for SKIP/POST filter
-- openrouter/free as primary model (auto-selects best available)
+ReferJobs Bot — Production Ready (all 9 fixes applied)
 
-Fixes applied:
-- Source 2 event handler scoped directly via chats=[SOURCE_CHANNEL_2] (no more normalize_id fragility)
-- incoming=True added to avoid catching outgoing messages
-- 30s aiohttp timeout added to prevent queue stalls on hung AI requests
-- Debug logging improved for Source 2
+Fix 1  — Source 1: polling every 60s with timestamp-based tracking persisted to disk
+Fix 2  — Source 2: persist last seen ID → catch-up on restart + 5-min backup poll
+Fix 3  — Single shared asyncio Queue for both sources (sequential, nothing dropped)
+Fix 4  — original source: line stripped before AI sees it (LINE_REMOVE_PATTERNS)
+Fix 5  — AI formatter removed; regex-based cleaner only (no thinking leaks)
+Fix 6  — FloodWaitError caught → exact wait → auto-retry
+Fix 7  — All AI models fail → wait 60s → retry once; never silently drops
+Fix 8  — State file reads wrapped in try/except; corrupt file → safe defaults + log
+Fix 9  — Dedup set capped at 1000 most-recent IDs (no memory leak)
 """
 
 import asyncio
-import re
+import json
 import os
+import re
+import time
 import aiohttp
 from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 from dotenv import load_dotenv
 
@@ -32,9 +34,12 @@ SOURCE_CHANNEL_2 = int(os.getenv("TG_SOURCE_2"))
 YOUR_CHANNEL     = int(os.getenv("TG_YOUR_CHANNEL"))
 USERBOT_SESSION  = os.getenv("TG_USERBOT_SESSION", "")
 OPENROUTER_KEY   = os.getenv("OPENROUTER_API_KEY")
-POLL_INTERVAL    = 60  # seconds between Source 1 polls
 
-# openrouter/free auto-selects best available free model — never goes fully down
+POLL_INTERVAL_S1      = 60    # Source 1 poll interval (seconds)
+POLL_INTERVAL_S2      = 300   # Source 2 backup poll interval (seconds)
+DEDUP_MAX_SIZE        = 1000  # Fix 9: cap dedup set size
+STATE_FILE            = os.path.join(os.path.dirname(__file__), "state.json")
+
 MODELS = [
     "openrouter/free",
     "qwen/qwen3-8b:free",
@@ -45,48 +50,130 @@ MODELS = [
 # ── Telegram client ───────────────────────────────────────────────────────────
 userbot = TelegramClient(StringSession(USERBOT_SESSION), API_ID, API_HASH)
 
-# ── State ─────────────────────────────────────────────────────────────────────
-last_seen_id = {"source1": 0}
-message_queue = asyncio.Queue()
+# ── Shared queue (Fix 3) ──────────────────────────────────────────────────────
+message_queue: asyncio.Queue = asyncio.Queue()
+
+# ── Dedup set — capped at DEDUP_MAX_SIZE (Fix 9) ─────────────────────────────
+# Stored as list to maintain insertion order for eviction of oldest
+processed_ids: list = []
+processed_ids_set: set = set()
 
 
+def dedup_add(msg_id: int) -> bool:
+    """
+    Add msg_id to dedup tracker.
+    Returns True if it's new (not seen before), False if duplicate.
+    Evicts oldest when cap is reached (Fix 9).
+    """
+    if msg_id in processed_ids_set:
+        return False
+    if len(processed_ids) >= DEDUP_MAX_SIZE:
+        oldest = processed_ids.pop(0)
+        processed_ids_set.discard(oldest)
+    processed_ids.append(msg_id)
+    processed_ids_set.add(msg_id)
+    return True
 
-# ── OpenRouter AI call ────────────────────────────────────────────────────────
+
+# ── Persistent state (Fix 1, Fix 2, Fix 8) ───────────────────────────────────
+def load_state() -> dict:
+    """
+    Load persisted state from disk.
+    Fix 8: wrap in try/except — corrupt file falls back to safe defaults.
+    """
+    defaults = {
+        "source1_last_timestamp": 0.0,
+        "source2_last_id": 0,
+    }
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Validate expected keys exist
+            for key in defaults:
+                if key not in data:
+                    data[key] = defaults[key]
+            print(f"[State] Loaded: source1_ts={data['source1_last_timestamp']}, source2_id={data['source2_last_id']}")
+            return data
+    except Exception as e:
+        print(f"[State] ⚠️  State file corrupt or unreadable ({e}). Using safe defaults.")
+    return dict(defaults)
+
+
+def save_state(state: dict):
+    """
+    Atomically write state to disk using a temp file + rename (Fix 8).
+    Prevents corruption if power is lost mid-write.
+    """
+    tmp = STATE_FILE + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.replace(tmp, STATE_FILE)
+    except Exception as e:
+        print(f"[State] ⚠️  Could not save state: {e}")
+
+
+# Mutable state dict shared across coroutines
+state: dict = {}
+
+
+# ── OpenRouter AI call (Fix 7) ────────────────────────────────────────────────
 async def call_ai(prompt: str) -> str:
-    """Call OpenRouter with model fallback."""
-    last_error = None
-    timeout = aiohttp.ClientTimeout(total=30)  # Prevent queue stall on hung requests
-    for model in MODELS:
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {OPENROUTER_KEY}",
-                        "Content-Type": "application/json",
-                        "HTTP-Referer": "https://referjobs.in",
-                        "X-Title": "ReferJobs",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 512,
-                        "temperature": 0.1,
-                    }
-                ) as resp:
-                    data = await resp.json()
-                    if "choices" in data:
-                        result = data["choices"][0]["message"]["content"].strip()
-                        print(f"  → Used model: {model}")
-                        return result
-                    err = data.get("error", {}).get("message", "unknown")
-                    print(f"  → {model} failed: {err[:80]}, trying next...")
-                    last_error = err
-        except Exception as e:
-            print(f"  → {model} exception: {e}, trying next...")
-            last_error = str(e)
-        await asyncio.sleep(1)
-    raise RuntimeError(f"All models failed. Last: {last_error}")
+    """
+    Call OpenRouter with model fallback.
+    Fix 7: if ALL models fail → wait 60s → retry once.
+    """
+    timeout = aiohttp.ClientTimeout(total=30)
+
+    async def _try_all_models() -> str | None:
+        last_error = None
+        for model in MODELS:
+            try:
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {OPENROUTER_KEY}",
+                            "Content-Type": "application/json",
+                            "HTTP-Referer": "https://referjobs.in",
+                            "X-Title": "ReferJobs",
+                        },
+                        json={
+                            "model": model,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "max_tokens": 512,
+                            "temperature": 0.1,
+                        }
+                    ) as resp:
+                        data = await resp.json()
+                        if "choices" in data:
+                            result = data["choices"][0]["message"]["content"].strip()
+                            print(f"  → Used model: {model}")
+                            return result
+                        err = data.get("error", {}).get("message", "unknown")
+                        print(f"  → {model} failed: {err[:80]}, trying next...")
+                        last_error = err
+            except Exception as e:
+                print(f"  → {model} exception: {e}, trying next...")
+                last_error = str(e)
+            await asyncio.sleep(1)
+        return None  # all failed
+
+    # First attempt
+    result = await _try_all_models()
+    if result is not None:
+        return result
+
+    # Fix 7: all failed on first pass → wait 60s → retry once
+    print("  → [AI] All models failed. Waiting 60s before retry...")
+    await asyncio.sleep(60)
+    result = await _try_all_models()
+    if result is not None:
+        return result
+
+    # Both passes failed
+    raise RuntimeError("All AI models failed on both attempts.")
 
 
 # ── Should we post this? ──────────────────────────────────────────────────────
@@ -117,7 +204,7 @@ Answer (POST or SKIP):"""
     return result.strip().upper().startswith("POST")
 
 
-# ── Regex-based message cleaner (no AI) ──────────────────────────────────────
+# ── Regex-based message cleaner (Fix 4, Fix 5) ───────────────────────────────
 # Patterns matched LINE BY LINE — any line matching gets dropped entirely
 LINE_REMOVE_PATTERNS = [
     re.compile(r'https?://t\.me/\S+', re.IGNORECASE),           # t.me links
@@ -137,7 +224,8 @@ LINE_REMOVE_PATTERNS = [
     re.compile(r'(channel|group|community)\s*[:\-]\s*@[A-Za-z0-9_]+', re.IGNORECASE),
     re.compile(r'source\s*[:\-]\s*@[A-Za-z0-9_]+', re.IGNORECASE),
     re.compile(r'via\s+@[A-Za-z0-9_]+', re.IGNORECASE),
-    re.compile(r'original\s+source\s*[:\-].*', re.IGNORECASE),   # "Original source: SDE Jobs and Internships"
+    # Fix 4: Strip "Original source: SDE Jobs and Internships" attribution line
+    re.compile(r'original\s+source\s*[:\-].*', re.IGNORECASE),
 ]
 
 # Inline patterns — strip the match but keep the rest of the line
@@ -158,7 +246,7 @@ HEADER = "ReferJobs - Find Refer Grow"
 def clean_message(text: str) -> str:
     """
     Clean a job post by removing channel branding and promo content.
-    No AI involved — pure regex. Fast and deterministic.
+    Fix 5: No AI involved — pure regex. Fast and deterministic.
     """
     lines = text.split('\n')
     cleaned = []
@@ -178,20 +266,34 @@ def clean_message(text: str) -> str:
     return result.strip()
 
 
-# ── Post to ReferJobs channel ─────────────────────────────────────────────────
-async def post_to_channel(formatted: str):
-    await userbot.send_message(YOUR_CHANNEL, formatted)
-    print(f"  → ✅ Posted to ReferJobs channel")
+# ── Post to ReferJobs channel (Fix 6) ────────────────────────────────────────
+async def post_to_channel(text: str):
+    """
+    Send a message to YOUR_CHANNEL.
+    Fix 6: Catch FloodWaitError → sleep exact wait → retry automatically.
+    """
+    while True:
+        try:
+            await userbot.send_message(YOUR_CHANNEL, text)
+            print("  → ✅ Posted to ReferJobs channel")
+            return
+        except FloodWaitError as e:
+            print(f"  → ⏳ FloodWaitError: Telegram says wait {e.seconds}s. Waiting...")
+            await asyncio.sleep(e.seconds + 5)  # +5s buffer
+            # Loop back and retry
+        except Exception as e:
+            print(f"  → ❌ Post failed: {e}")
+            raise
 
 
 # ── Process a single message ──────────────────────────────────────────────────
 async def process_message(text: str, source: str):
-    """Full pipeline: filter → clean → post. No AI formatting."""
+    """Full pipeline: clean → AI filter → post. No AI formatting (Fix 5)."""
     text = text.strip()
     if not text:
         return
 
-    print(f"\n[{source}] New message: {text[:80]}...")
+    print(f"\n[{source}] Processing: {text[:80]}...")
 
     # Step 1 — Regex clean (strip branding, promo links BEFORE AI sees it)
     cleaned = clean_message(text)
@@ -200,22 +302,28 @@ async def process_message(text: str, source: str):
         return
 
     # Step 2 — AI filter on clean text only (POST or SKIP)
-    should = await should_post(cleaned)
+    # Fix 7: call_ai handles retry internally
+    try:
+        should = await should_post(cleaned)
+    except RuntimeError as e:
+        print(f"  → ❌ AI filter failed permanently: {e}. Skipping message.")
+        return
+
     if not should:
         print(f"  → Skipped (not a job post)")
         return
 
-    # Step 3 — Add header and post
+    # Step 3 — Add header and post (Fix 6: FloodWaitError handled in post_to_channel)
     final = f"{HEADER}\n\n{cleaned}"
     await post_to_channel(final)
 
-    # Brief delay to respect Telegram flood limits
+    # Brief delay to respect Telegram rate limits
     await asyncio.sleep(3)
 
 
-# ── Queue worker ──────────────────────────────────────────────────────────────
+# ── Queue worker (Fix 3) ──────────────────────────────────────────────────────
 async def queue_worker():
-    """Processes messages sequentially — handles bulk without drops."""
+    """Processes messages strictly one at a time — handles bulk without drops."""
     print("[Queue] Worker started")
     while True:
         text, source = await message_queue.get()
@@ -227,69 +335,168 @@ async def queue_worker():
             message_queue.task_done()
 
 
-# ── Source 1: Polling ─────────────────────────────────────────────────────────
+# ── Source 1: Polling with persistent timestamp (Fix 1, Fix 8) ───────────────
 async def poll_source1():
     """
-    Poll Source 1 every 60 seconds via get_messages().
-    Works for private/restricted channels where events may not fire.
+    Poll Source 1 every 60s via get_messages().
+    Fix 1: Timestamp-based tracking persisted to disk.
+    Works for private/restricted channels where events don't reliably fire.
     """
-    print(f"[Source1] Polling started (every {POLL_INTERVAL}s)")
+    print(f"[Source1] Polling started (every {POLL_INTERVAL_S1}s)")
 
-    # Capture current latest ID so we only process NEW messages going forward
-    try:
-        messages = await userbot.get_messages(SOURCE_CHANNEL_1, limit=1)
-        if messages:
-            last_seen_id["source1"] = messages[0].id
-            print(f"[Source1] Starting from message ID: {last_seen_id['source1']}")
-    except Exception as e:
-        print(f"[Source1] Could not get initial message ID: {e}")
+    # Bootstrap: if no saved timestamp, capture current time so we don't reprocess history
+    if state["source1_last_timestamp"] == 0.0:
+        try:
+            msgs = await userbot.get_messages(SOURCE_CHANNEL_1, limit=1)
+            if msgs:
+                state["source1_last_timestamp"] = msgs[0].date.timestamp()
+                save_state(state)
+                print(f"[Source1] Bootstrapped timestamp: {msgs[0].date}")
+        except Exception as e:
+            print(f"[Source1] Could not bootstrap initial timestamp: {e}")
 
     while True:
-        await asyncio.sleep(POLL_INTERVAL)
+        await asyncio.sleep(POLL_INTERVAL_S1)
         try:
-            messages = await userbot.get_messages(
-                SOURCE_CHANNEL_1,
-                limit=50,
-                min_id=last_seen_id["source1"]
-            )
+            messages = await userbot.get_messages(SOURCE_CHANNEL_1, limit=50)
 
             if not messages:
-                print(f"[Source1] No new messages")
+                continue
+
+            last_ts = state["source1_last_timestamp"]
+            new_messages = [
+                m for m in messages
+                if m.date.timestamp() > last_ts and (m.text or m.caption or "").strip()
+            ]
+
+            if not new_messages:
+                print(f"[Source1] No new messages since last poll")
                 continue
 
             # Process oldest → newest
-            for msg in reversed(messages):
+            for msg in sorted(new_messages, key=lambda m: m.date):
                 text = msg.text or msg.caption or ""
-                if text.strip():
+                if dedup_add(msg.id):
                     await message_queue.put((text, "source1"))
-                last_seen_id["source1"] = max(last_seen_id["source1"], msg.id)
 
-            print(f"[Source1] Queued {len(messages)} new message(s)")
+                # Advance timestamp
+                ts = msg.date.timestamp()
+                if ts > state["source1_last_timestamp"]:
+                    state["source1_last_timestamp"] = ts
+
+            save_state(state)
+            print(f"[Source1] Queued {len(new_messages)} new message(s)")
 
         except Exception as e:
             print(f"[Source1] Poll error: {e}")
 
 
-# ── Source 2: Event-based ─────────────────────────────────────────────────────
-# chats=[SOURCE_CHANNEL_2] → Telethon filters at library level (no ID comparison fragility)
-# incoming=True → skip outgoing messages sent by the userbot itself
+# ── Source 2: Event-based + catch-up + backup poll (Fix 2, Fix 9) ────────────
 @userbot.on(events.NewMessage(chats=[SOURCE_CHANNEL_2], incoming=True))
-async def on_new_message(event):
-    """Source 2 handler — routes incoming messages to the processing queue."""
+async def on_new_message_source2(event):
+    """
+    Source 2 primary handler — routes incoming messages to queue instantly.
+    Fix 9: dedup_add() prevents double posting if backup poll catches same message.
+    """
     try:
         text = event.message.text or event.message.caption or ""
         if text.strip():
-            print(f"[Source2] 📥 Received message (id={event.message.id}): {text[:60]}...")
-            await message_queue.put((text, "source2"))
+            msg_id = event.message.id
+            print(f"[Source2] 📥 Event received (id={msg_id}): {text[:60]}...")
+            if dedup_add(msg_id):
+                await message_queue.put((text, "source2"))
+                # Persist new highest ID (Fix 2)
+                if msg_id > state["source2_last_id"]:
+                    state["source2_last_id"] = msg_id
+                    save_state(state)
+            else:
+                print(f"[Source2] ⏭ Duplicate skipped (id={msg_id})")
         else:
-            print(f"[Source2] ⏭ Skipped (media-only, no text, id={event.message.id})")
+            print(f"[Source2] ⏭ Skipped (media-only, id={event.message.id})")
     except Exception as e:
         print(f"[Source2] ❌ Event error (id={event.message.id}): {e}")
 
 
+async def catchup_source2():
+    """
+    Fix 2: On startup, fetch all messages posted to Source 2 while bot was offline.
+    Reads last seen ID from persistent state, fetches everything newer.
+    """
+    last_id = state["source2_last_id"]
+    if last_id == 0:
+        # First run — bootstrap from current latest so we don't reprocess history
+        try:
+            msgs = await userbot.get_messages(SOURCE_CHANNEL_2, limit=1)
+            if msgs:
+                state["source2_last_id"] = msgs[0].id
+                save_state(state)
+                print(f"[Source2] Bootstrapped last ID: {msgs[0].id}")
+        except Exception as e:
+            print(f"[Source2] Could not bootstrap last ID: {e}")
+        return
+
+    print(f"[Source2] Catching up from message ID {last_id}...")
+    try:
+        missed = await userbot.get_messages(SOURCE_CHANNEL_2, limit=100, min_id=last_id)
+        if not missed:
+            print("[Source2] No missed messages.")
+            return
+
+        count = 0
+        for msg in sorted(missed, key=lambda m: m.id):
+            text = msg.text or msg.caption or ""
+            if text.strip() and dedup_add(msg.id):
+                await message_queue.put((text, "source2-catchup"))
+                count += 1
+                if msg.id > state["source2_last_id"]:
+                    state["source2_last_id"] = msg.id
+
+        save_state(state)
+        print(f"[Source2] Queued {count} missed message(s) from catch-up")
+    except Exception as e:
+        print(f"[Source2] Catch-up error: {e}")
+
+
+async def backup_poll_source2():
+    """
+    Fix 2: Poll Source 2 every 5 minutes as safety net for rare event drops.
+    Dedup ensures no double-posting if event + poll both catch same message.
+    """
+    print(f"[Source2-Backup] Backup polling started (every {POLL_INTERVAL_S2}s)")
+    while True:
+        await asyncio.sleep(POLL_INTERVAL_S2)
+        try:
+            last_id = state["source2_last_id"]
+            messages = await userbot.get_messages(SOURCE_CHANNEL_2, limit=20, min_id=last_id)
+            if not messages:
+                continue
+
+            count = 0
+            for msg in sorted(messages, key=lambda m: m.id):
+                text = msg.text or msg.caption or ""
+                if text.strip() and dedup_add(msg.id):
+                    await message_queue.put((text, "source2-backup"))
+                    count += 1
+                    if msg.id > state["source2_last_id"]:
+                        state["source2_last_id"] = msg.id
+
+            if count:
+                save_state(state)
+                print(f"[Source2-Backup] Queued {count} message(s) from backup poll")
+
+        except Exception as e:
+            print(f"[Source2-Backup] Poll error: {e}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 async def main():
+    global state
+
     print("🚀 ReferJobs bot starting...")
+
+    # Fix 8: Load persistent state with corruption safety
+    state = load_state()
+
     await userbot.start()
     me = await userbot.get_me()
     print(f"✅ Connected as: {me.first_name} (@{me.username})")
@@ -299,15 +506,20 @@ async def main():
     await userbot.get_dialogs()
     print("✅ Dialogs loaded")
 
-    print(f"📡 Source 1 (polling): {SOURCE_CHANNEL_1}")
-    print(f"📡 Source 2 (events):  {SOURCE_CHANNEL_2}")
+    print(f"📡 Source 1 (polling every {POLL_INTERVAL_S1}s): {SOURCE_CHANNEL_1}")
+    print(f"📡 Source 2 (events + backup poll every {POLL_INTERVAL_S2}s): {SOURCE_CHANNEL_2}")
     print(f"📤 Posting to: {YOUR_CHANNEL}")
     print(f"🤖 Models: {', '.join(MODELS)}")
-    print(f"⏳ Waiting for messages...\n")
+
+    # Fix 2: Catch up on missed Source 2 messages before starting normal operations
+    await catchup_source2()
+
+    print("⏳ Waiting for messages...\n")
 
     await asyncio.gather(
         userbot.run_until_disconnected(),
         poll_source1(),
+        backup_poll_source2(),
         queue_worker(),
     )
 
