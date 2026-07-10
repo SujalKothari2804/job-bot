@@ -1,5 +1,5 @@
 """
-ReferJobs Bot — Production Ready (all 9 fixes applied)
+ReferJobs Bot — Production Ready (all 9 fixes + branded formatting)
 
 Fix 1  — Source 1: polling every 60s with timestamp-based tracking persisted to disk
 Fix 2  — Source 2: persist last seen ID → catch-up on restart + 5-min backup poll
@@ -10,6 +10,7 @@ Fix 6  — FloodWaitError caught → exact wait → auto-retry
 Fix 7  — All AI models fail → wait 60s → retry once; never silently drops
 Fix 8  — State file reads wrapped in try/except; corrupt file → safe defaults + log
 Fix 9  — Dedup set capped at 1000 most-recent IDs (no memory leak)
+Formatting — Strip Unicode bold + emojis → inject our own emojis + header (plain Source-2 style)
 """
 
 import asyncio
@@ -17,6 +18,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 import aiohttp
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
@@ -240,7 +242,121 @@ INLINE_REMOVE_PATTERNS = [
     re.compile(r'https?://linkedin\.com/company/\S+', re.IGNORECASE),
 ]
 
-HEADER = "ReferJobs - Find Refer Grow"
+# ── ReferJobs brand formatting ───────────────────────────────────────────────
+OUR_HEADER = "🚨 𝐅𝐑𝐄𝐄 𝐑𝐄𝐅𝐄𝐑𝐑𝐀𝐋 𝐀𝐋𝐄𝐑𝐓 🚨"
+
+# Matches emoji characters across all common Unicode emoji ranges
+EMOJI_PATTERN = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"   # emoticons
+    "\U0001F300-\U0001F5FF"   # symbols & pictographs
+    "\U0001F680-\U0001F6FF"   # transport & map
+    "\U0001F700-\U0001F77F"   # alchemical
+    "\U0001F780-\U0001F7FF"   # geometric shapes extended
+    "\U0001F800-\U0001F8FF"   # supplemental arrows-c
+    "\U0001F900-\U0001F9FF"   # supplemental symbols
+    "\U0001FA00-\U0001FA6F"   # chess symbols
+    "\U0001FA70-\U0001FAFF"   # symbols extended-a
+    "\U00002702-\U000027B0"   # dingbats
+    "\U000024C2-\U0001F251"   # misc
+    "]+",
+    flags=re.UNICODE,
+)
+
+# Detect a non-field "alert/header" first line (safe to replace with our header)
+ALERT_HEADER_PATTERN = re.compile(
+    r'\b(free|new|urgent|hiring|job alert|internship alert|referral alert|'
+    r'opening|opportunity|alert|announcement)\b',
+    re.IGNORECASE,
+)
+
+# Detect lines that ARE job field labels (do NOT replace these as headers)
+FIELD_START_PATTERN = re.compile(
+    r'^(company|role|position|location|stipend|salary|apply|email|batch|eligibility)\s*[:\-]',
+    re.IGNORECASE,
+)
+
+# Ordered list of (field-label regex, our emoji)
+# Matched against the START of a stripped line
+FIELD_EMOJI_MAP = [
+    (re.compile(r'^company\s*[:\-]', re.IGNORECASE),                                           '🏢'),
+    (re.compile(r'^(role|position|title|designation|job title)\s*[:\-]', re.IGNORECASE),       '💼'),
+    (re.compile(r'^(batch|year|graduation year|passing year)\s*[:\-]', re.IGNORECASE),         '🎓'),
+    (re.compile(r'^(eligibility|qualification|education)\b', re.IGNORECASE),                   '🎓'),
+    (re.compile(r'^(stipend|salary|ctc|package|compensation)\s*[:\-]', re.IGNORECASE),         '💰'),
+    (re.compile(r'^(location|place|city|work location)\s*[:\-]', re.IGNORECASE),              '📍'),
+    (re.compile(r'^(responsibilities|requirements|skills required|your role|what you.ll do|who can apply)\b', re.IGNORECASE), '🛠'),
+    (re.compile(r'^(what you.ll work on|what you will work on|key responsibilities)\b', re.IGNORECASE), '🚀'),
+    (re.compile(r'^(internship details?|job details?|offer details?|about the (role|position|internship))\b', re.IGNORECASE), '📌'),
+    (re.compile(r'^(apply|how to apply|application link|apply here|apply now)\s*[:\-]?', re.IGNORECASE), '📩'),
+    (re.compile(r'^(contact|email|reach us)\s*[:\-]', re.IGNORECASE),                         '📩'),
+    (re.compile(r'^(experience|exp required|years of exp)\s*[:\-]', re.IGNORECASE),           '⚡'),
+    (re.compile(r'^(skills?)\s*[:\-]', re.IGNORECASE),                                        '⚡'),
+    (re.compile(r'^(deadline|last date|last day|apply by|closing date)\s*[:\-]', re.IGNORECASE), '⏰'),
+    (re.compile(r'^(work type|work mode|mode|type|job type|employment type)\s*[:\-]', re.IGNORECASE), '🖥'),
+    (re.compile(r'^(perks?|benefits?|what we offer)\b', re.IGNORECASE),                       '🎁'),
+]
+
+
+def format_for_referjobs(text: str) -> str:
+    """
+    Apply ReferJobs branded formatting to a cleaned job post:
+    1. Normalize Unicode math-bold/italic → plain ASCII  (fixes font inconsistency)
+    2. Strip all emojis from the body
+    3. Detect and replace/inject our standard header
+    4. Inject our fixed emoji set on recognised field labels
+    Result: plain Source-2 style text, consistently branded regardless of source.
+    """
+    # Step 1 — Unicode normalisation (NFKC decomposes math-bold 𝐀→A, etc.)
+    text = unicodedata.normalize('NFKC', text)
+
+    # Step 2 — Strip all emojis
+    text = EMOJI_PATTERN.sub('', text)
+
+    # Clean up any double-spaces left after emoji removal, and trim lines
+    lines = [line.rstrip() for line in text.split('\n')]
+
+    # Step 3 — Handle header: find first non-empty line
+    header_injected = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        is_field = bool(FIELD_START_PATTERN.match(stripped))
+        is_alert = bool(ALERT_HEADER_PATTERN.search(stripped))
+        if is_alert and not is_field:
+            # Replace their alert line with ours
+            lines[i] = OUR_HEADER
+        else:
+            # Content starts immediately — inject our header above it
+            lines.insert(i, '')
+            lines.insert(i, OUR_HEADER)
+        header_injected = True
+        break
+
+    if not header_injected:
+        lines = [OUR_HEADER, ''] + lines
+
+    # Step 4 — Inject our emojis on recognised field label lines
+    result_lines = []
+    for line in lines:
+        stripped = line.strip()
+        # Skip blank lines and our header (already has its emoji)
+        if not stripped or stripped == OUR_HEADER:
+            result_lines.append(line)
+            continue
+        injected = False
+        for pattern, emoji in FIELD_EMOJI_MAP:
+            if pattern.match(stripped):
+                result_lines.append(f"{emoji} {stripped}")
+                injected = True
+                break
+        if not injected:
+            result_lines.append(line)
+
+    result = '\n'.join(result_lines)
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    return result.strip()
 
 
 def clean_message(text: str) -> str:
@@ -313,8 +429,9 @@ async def process_message(text: str, source: str):
         print(f"  → Skipped (not a job post)")
         return
 
-    # Step 3 — Add header and post (Fix 6: FloodWaitError handled in post_to_channel)
-    final = f"{HEADER}\n\n{cleaned}"
+    # Step 3 — Apply ReferJobs brand formatting, then post
+    # (Fix 6: FloodWaitError handled inside post_to_channel)
+    final = format_for_referjobs(cleaned)
     await post_to_channel(final)
 
     # Brief delay to respect Telegram rate limits
