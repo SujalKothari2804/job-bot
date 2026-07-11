@@ -209,25 +209,33 @@ Answer (POST or SKIP):"""
 # ── Regex-based message cleaner (Fix 4, Fix 5) ───────────────────────────────
 # Patterns matched LINE BY LINE — any line matching gets dropped entirely
 LINE_REMOVE_PATTERNS = [
-    re.compile(r'https?://t\.me/\S+', re.IGNORECASE),           # t.me links
-    re.compile(r'\bt\.me/\S+', re.IGNORECASE),                   # t.me without http
-    re.compile(r'https?://wa\.me/\S+', re.IGNORECASE),           # WhatsApp wa.me
-    re.compile(r'https?://chat\.whatsapp\.com/\S+', re.IGNORECASE),  # WhatsApp groups
-    re.compile(r'join (our|the|us|this)\b', re.IGNORECASE),      # "join our channel"
-    re.compile(r'follow (us|our|me)\b', re.IGNORECASE),          # "follow us on"
-    re.compile(r'subscribe (to|our|now)\b', re.IGNORECASE),      # "subscribe to"
-    re.compile(r'for (more|daily|latest|free|regular) (jobs?|updates?|opportunities?|alerts?|referrals?)', re.IGNORECASE),
+    # ── Link patterns ─────────────────────────────────────────────────────────
+    re.compile(r'https?://t\.me/\S+', re.IGNORECASE),                  # t.me links
+    re.compile(r'\bt\.me/\S+', re.IGNORECASE),                          # t.me without http
+    re.compile(r'https?://wa\.me/\S+', re.IGNORECASE),                  # WhatsApp wa.me
+    re.compile(r'https?://chat\.whatsapp\.com/\S+', re.IGNORECASE),     # WhatsApp group invite
+    re.compile(r'https?://whatsapp\.com/\S+', re.IGNORECASE),           # WhatsApp channel links
+    re.compile(r'https?://whatsapp\.com$', re.IGNORECASE),              # bare whatsapp.com
+    # ── Promo / CTA patterns ──────────────────────────────────────────────────
+    re.compile(r'\bjoin\b.{0,60}\b(jobs?|internship|referral|update|channel|group|telegram|whatsapp)\b', re.IGNORECASE),  # "Join JobDrop for daily jobs"
+    re.compile(r'join (our|the|us|this)\b', re.IGNORECASE),             # "join our channel"
+    re.compile(r'follow (us|our|me)\b', re.IGNORECASE),                 # "follow us on"
+    re.compile(r'subscribe (to|our|now)\b', re.IGNORECASE),             # "subscribe to"
+    re.compile(r'for (more|daily|latest|free|regular)\b.{0,30}\b(jobs?|updates?|opportunities?|alerts?|referrals?)', re.IGNORECASE),  # "for daily fresher jobs"
     re.compile(r'(click|tap) (here|the link|below|above)', re.IGNORECASE),
     re.compile(r'forward (this|to your)', re.IGNORECASE),
     re.compile(r'share (this|with your|in your)', re.IGNORECASE),
     re.compile(r'powered by\b', re.IGNORECASE),
     re.compile(r'brought to you by\b', re.IGNORECASE),
-    re.compile(r'^\s*@[A-Za-z0-9_]+\s*$'),                       # line is just a @handle
+    re.compile(r'get (free|daily|latest)\b.{0,30}\b(jobs?|updates?|referrals?|alerts?)', re.IGNORECASE),  # "get daily job updates"
+    # ── Handle / attribution patterns ─────────────────────────────────────────
+    re.compile(r'^\s*@[A-Za-z0-9_]+\s*$'),                              # line is just a @handle
     re.compile(r'(channel|group|community)\s*[:\-]\s*@[A-Za-z0-9_]+', re.IGNORECASE),
     re.compile(r'source\s*[:\-]\s*@[A-Za-z0-9_]+', re.IGNORECASE),
     re.compile(r'via\s+@[A-Za-z0-9_]+', re.IGNORECASE),
-    # Fix 4: Strip "Original source: SDE Jobs and Internships" attribution line
-    re.compile(r'original\s+source\s*[:\-].*', re.IGNORECASE),
+    re.compile(r'original\s+source\s*[:\-].*', re.IGNORECASE),         # Fix 4
+    # ── Separator / divider lines ─────────────────────────────────────────────
+    re.compile(r'^[\s━─═\-_~*=\.]{5,}$'),                              # ━━━ / --- / === etc.
 ]
 
 # Inline patterns — strip the match but keep the rest of the line
@@ -236,6 +244,7 @@ INLINE_REMOVE_PATTERNS = [
     re.compile(r'\bt\.me/\S+', re.IGNORECASE),
     re.compile(r'https?://wa\.me/\S+', re.IGNORECASE),
     re.compile(r'https?://chat\.whatsapp\.com/\S+', re.IGNORECASE),
+    re.compile(r'https?://whatsapp\.com/\S+', re.IGNORECASE),           # WhatsApp channel links
     re.compile(r'https?://instagram\.com/\S+', re.IGNORECASE),
     re.compile(r'https?://twitter\.com/\S+', re.IGNORECASE),
     re.compile(r'https?://x\.com/\S+', re.IGNORECASE),
@@ -259,6 +268,8 @@ EMOJI_PATTERN = re.compile(
     "\U0001FA70-\U0001FAFF"   # symbols extended-a
     "\U00002702-\U000027B0"   # dingbats
     "\U000024C2-\U0001F251"   # misc
+    "\U00002300-\U000023FF"   # miscellaneous technical (⏳⏰⌛ etc.)
+    "\U00002600-\U000026FF"   # miscellaneous symbols (☀️⭐ etc.)
     "]+",
     flags=re.UNICODE,
 )
@@ -279,22 +290,24 @@ FIELD_START_PATTERN = re.compile(
 # Ordered list of (field-label regex, our emoji)
 # Matched against the START of a stripped line
 FIELD_EMOJI_MAP = [
-    (re.compile(r'^company\s*[:\-]', re.IGNORECASE),                                           '🏢'),
-    (re.compile(r'^(role|position|title|designation|job title)\s*[:\-]', re.IGNORECASE),       '💼'),
-    (re.compile(r'^(batch|year|graduation year|passing year)\s*[:\-]', re.IGNORECASE),         '🎓'),
-    (re.compile(r'^(eligibility|qualification|education)\b', re.IGNORECASE),                   '🎓'),
-    (re.compile(r'^(stipend|salary|ctc|package|compensation)\s*[:\-]', re.IGNORECASE),         '💰'),
-    (re.compile(r'^(location|place|city|work location)\s*[:\-]', re.IGNORECASE),              '📍'),
+    (re.compile(r'^company\s*[:\-]', re.IGNORECASE),                                                        '🏢'),
+    (re.compile(r'^(role|position|title|designation|job title)\s*[:\-]', re.IGNORECASE),                    '💼'),
+    (re.compile(r'^(batch|year|graduation year|passing year)\s*[:\-]', re.IGNORECASE),                      '🎓'),
+    (re.compile(r'^(eligibility|qualification|education)\b', re.IGNORECASE),                                '🎓'),
+    (re.compile(r'^(stipend|salary|ctc|package|compensation)\s*[:\-]', re.IGNORECASE),                      '💰'),
+    (re.compile(r'^(location|place|city|work location)\s*[:\-]', re.IGNORECASE),                           '📍'),
+    (re.compile(r'^(duration|internship duration|program duration)\s*[:\-]', re.IGNORECASE),                '⏳'),
     (re.compile(r'^(responsibilities|requirements|skills required|your role|what you.ll do|who can apply)\b', re.IGNORECASE), '🛠'),
-    (re.compile(r'^(what you.ll work on|what you will work on|key responsibilities)\b', re.IGNORECASE), '🚀'),
+    (re.compile(r'^(what you.ll work on|what you will work on|key responsibilities)\b', re.IGNORECASE),      '🚀'),
+    (re.compile(r'^(key highlights?|highlights?)\s*[:\-]?', re.IGNORECASE),                                 '📌'),
     (re.compile(r'^(internship details?|job details?|offer details?|about the (role|position|internship))\b', re.IGNORECASE), '📌'),
-    (re.compile(r'^(apply|how to apply|application link|apply here|apply now)\s*[:\-]?', re.IGNORECASE), '📩'),
-    (re.compile(r'^(contact|email|reach us)\s*[:\-]', re.IGNORECASE),                         '📩'),
-    (re.compile(r'^(experience|exp required|years of exp)\s*[:\-]', re.IGNORECASE),           '⚡'),
-    (re.compile(r'^(skills?)\s*[:\-]', re.IGNORECASE),                                        '⚡'),
-    (re.compile(r'^(deadline|last date|last day|apply by|closing date)\s*[:\-]', re.IGNORECASE), '⏰'),
-    (re.compile(r'^(work type|work mode|mode|type|job type|employment type)\s*[:\-]', re.IGNORECASE), '🖥'),
-    (re.compile(r'^(perks?|benefits?|what we offer)\b', re.IGNORECASE),                       '🎁'),
+    (re.compile(r'^(apply|how to apply|application link|apply here|apply now)\s*[:\-]?', re.IGNORECASE),    '📩'),
+    (re.compile(r'^(contact|email|reach us)\s*[:\-]', re.IGNORECASE),                                      '📩'),
+    (re.compile(r'^(experience|exp required|years of exp)\s*[:\-]', re.IGNORECASE),                        '⚡'),
+    (re.compile(r'^(skills?)\s*[:\-]', re.IGNORECASE),                                                     '⚡'),
+    (re.compile(r'^(deadline|last date|last day|apply by|closing date)\s*[:\-]', re.IGNORECASE),            '⏰'),
+    (re.compile(r'^(work type|work mode|mode|type|job type|employment type)\s*[:\-]', re.IGNORECASE),       '🖥'),
+    (re.compile(r'^(perks?|benefits?|what we offer)\b', re.IGNORECASE),                                     '🎁'),
 ]
 
 
