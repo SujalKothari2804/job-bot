@@ -636,7 +636,7 @@ async def main():
     await userbot.get_dialogs()
     print("✅ Dialogs loaded")
 
-    print(f"📡 Source 1 (polling every {POLL_INTERVAL_S1}s): {SOURCE_CHANNEL_1}")
+    print(f"📡 Source 1 (DISABLED): {SOURCE_CHANNEL_1}")
     print(f"📡 Source 2 (events + backup poll every {POLL_INTERVAL_S2}s): {SOURCE_CHANNEL_2}")
     print(f"📤 Posting to: {YOUR_CHANNEL}")
     print(f"🤖 Models: {', '.join(MODELS)}")
@@ -648,7 +648,6 @@ async def main():
 
     await asyncio.gather(
         userbot.run_until_disconnected(),
-        poll_source1(),
         backup_poll_source2(),
         queue_worker(),
     )
