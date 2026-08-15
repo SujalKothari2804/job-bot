@@ -522,7 +522,7 @@ async def poll_source1():
 
 
 # ── Source 2: Event-based + catch-up + backup poll (Fix 2, Fix 9) ────────────
-@userbot.on(events.NewMessage(chats=[SOURCE_CHANNEL_2], incoming=True))
+# @userbot.on(events.NewMessage(chats=[SOURCE_CHANNEL_2], incoming=True))
 async def on_new_message_source2(event):
     """
     Source 2 primary handler — routes incoming messages to queue instantly.
@@ -637,18 +637,17 @@ async def main():
     print("✅ Dialogs loaded")
 
     print(f"📡 Source 1 (DISABLED): {SOURCE_CHANNEL_1}")
-    print(f"📡 Source 2 (events + backup poll every {POLL_INTERVAL_S2}s): {SOURCE_CHANNEL_2}")
+    print(f"📡 Source 2 (DISABLED): {SOURCE_CHANNEL_2}")
     print(f"📤 Posting to: {YOUR_CHANNEL}")
     print(f"🤖 Models: {', '.join(MODELS)}")
 
     # Fix 2: Catch up on missed Source 2 messages before starting normal operations
-    await catchup_source2()
+    # await catchup_source2()
 
     print("⏳ Waiting for messages...\n")
 
     await asyncio.gather(
         userbot.run_until_disconnected(),
-        backup_poll_source2(),
         queue_worker(),
     )
 
