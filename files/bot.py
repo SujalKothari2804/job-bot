@@ -43,10 +43,12 @@ DEDUP_MAX_SIZE        = 1000  # Fix 9: cap dedup set size
 STATE_FILE            = os.path.join(os.path.dirname(__file__), "state.json")
 
 MODELS = [
+    "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-31b-it:free",
+    "liquid/lfm-2.5-2.6b:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "nex-agi/nex-n2.5-mini:free",
     "openrouter/free",
-    "qwen/qwen3-8b:free",
-    "deepseek/deepseek-chat-v3-0324:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
 ]
 
 # ── Telegram client ───────────────────────────────────────────────────────────
@@ -124,9 +126,9 @@ state: dict = {}
 async def call_ai(prompt: str) -> str:
     """
     Call OpenRouter with model fallback.
-    Fix 7: if ALL models fail → wait 60s → retry once.
+    Fix 7: if ALL models fail → wait 5s → retry once.
     """
-    timeout = aiohttp.ClientTimeout(total=30)
+    timeout = aiohttp.ClientTimeout(total=20)
 
     async def _try_all_models() -> str | None:
         last_error = None
@@ -159,7 +161,7 @@ async def call_ai(prompt: str) -> str:
             except Exception as e:
                 print(f"  → {model} exception: {e}, trying next...")
                 last_error = str(e)
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
         return None  # all failed
 
     # First attempt
@@ -167,15 +169,36 @@ async def call_ai(prompt: str) -> str:
     if result is not None:
         return result
 
-    # Fix 7: all failed on first pass → wait 60s → retry once
-    print("  → [AI] All models failed. Waiting 60s before retry...")
-    await asyncio.sleep(60)
+    # Short retry
+    print("  → [AI] All models failed on first pass. Retrying once...")
+    await asyncio.sleep(5)
     result = await _try_all_models()
     if result is not None:
         return result
 
-    # Both passes failed
-    raise RuntimeError("All AI models failed on both attempts.")
+    raise RuntimeError("All AI models failed or rate-limited.")
+
+
+# ── Heuristic Filter Fallback ─────────────────────────────────────────────────
+def is_likely_job_post(text: str) -> bool:
+    """
+    Fallback keyword heuristic if AI models are unavailable/rate-limited.
+    Ensures legitimate job/referral postings are not dropped.
+    """
+    lower = text.lower()
+    
+    # Negative indicators (DM spam, promo channels without job details)
+    if "dm me for referral" in lower or "fill the form to get referral" in lower:
+        return False
+        
+    job_indicators = [
+        'company', 'role', 'position', 'batch', 'stipend', 'salary', 'ctc',
+        'apply', 'eligibility', 'qualification', 'experience', 'hiring',
+        'referral', 'internship', 'job opening', 'full time', 'sde', 'engineer',
+        'developer', 'analyst', 'associate', 'graduates'
+    ]
+    matches = sum(1 for ind in job_indicators if ind in lower)
+    return matches >= 2
 
 
 # ── Should we post this? ──────────────────────────────────────────────────────
@@ -202,8 +225,12 @@ Message:
 
 Answer (POST or SKIP):"""
 
-    result = await call_ai(prompt)
-    return result.strip().upper().startswith("POST")
+    try:
+        result = await call_ai(prompt)
+        return result.strip().upper().startswith("POST")
+    except Exception as e:
+        print(f"  → ⚠️ AI filter unavailable ({e}). Using heuristic fallback.")
+        return is_likely_job_post(text)
 
 
 # ── Regex-based message cleaner (Fix 4, Fix 5) ───────────────────────────────
@@ -431,12 +458,11 @@ async def process_message(text: str, source: str):
         return
 
     # Step 2 — AI filter on clean text only (POST or SKIP)
-    # Fix 7: call_ai handles retry internally
     try:
         should = await should_post(cleaned)
-    except RuntimeError as e:
-        print(f"  → ❌ AI filter failed permanently: {e}. Skipping message.")
-        return
+    except Exception as e:
+        print(f"  → ⚠️ AI filter error: {e}. Using fallback heuristic.")
+        should = is_likely_job_post(cleaned)
 
     if not should:
         print(f"  → Skipped (not a job post)")
