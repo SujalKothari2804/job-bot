@@ -123,13 +123,21 @@ def save_state(state: dict):
 state: dict = {}
 
 
+# Rate-limit cooldown tracker for AI
+ai_cooldown_until = 0.0
+
+
 # ── OpenRouter AI call (Fix 7) ────────────────────────────────────────────────
 async def call_ai(prompt: str) -> str:
     """
     Call OpenRouter with model fallback.
-    Fix 7: if ALL models fail → wait 5s → retry once.
+    Caches rate-limit cooldown to process queued messages fast if free quota is hit.
     """
-    timeout = aiohttp.ClientTimeout(total=20)
+    global ai_cooldown_until
+    if time.time() < ai_cooldown_until:
+        raise RuntimeError("AI on rate-limit cooldown.")
+
+    timeout = aiohttp.ClientTimeout(total=15)
 
     async def _try_all_models() -> str | None:
         last_error = None
@@ -162,22 +170,16 @@ async def call_ai(prompt: str) -> str:
             except Exception as e:
                 print(f"  → {model} exception: {e}, trying next...")
                 last_error = str(e)
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
         return None  # all failed
 
-    # First attempt
     result = await _try_all_models()
     if result is not None:
         return result
 
-    # Short retry
-    print("  → [AI] All models failed on first pass. Retrying once...")
-    await asyncio.sleep(5)
-    result = await _try_all_models()
-    if result is not None:
-        return result
-
-    raise RuntimeError("All AI models failed or rate-limited.")
+    # If all failed (e.g. daily quota reached), cool down for 5 minutes
+    ai_cooldown_until = time.time() + 300
+    raise RuntimeError("All AI models failed or rate-limited. Setting 5m cooldown.")
 
 
 # ── Heuristic Filter Fallback ─────────────────────────────────────────────────
