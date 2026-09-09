@@ -447,34 +447,26 @@ async def post_to_channel(text: str):
 
 # ── Process a single message ──────────────────────────────────────────────────
 async def process_message(text: str, source: str):
-    """Full pipeline: clean → AI filter → post. No AI formatting (Fix 5)."""
+    """Process message and send as it is without editing or reformatting."""
     text = text.strip()
     if not text:
         return
 
     print(f"\n[{source}] Processing: {text[:80]}...")
 
-    # Step 1 — Regex clean (strip branding, promo links BEFORE AI sees it)
-    cleaned = clean_message(text)
-    if not cleaned:
-        print(f"  → Skipped (nothing left after cleaning)")
-        return
-
-    # Step 2 — AI filter on clean text only (POST or SKIP)
+    # AI / Heuristic filter
     try:
-        should = await should_post(cleaned)
+        should = await should_post(text)
     except Exception as e:
         print(f"  → ⚠️ AI filter error: {e}. Using fallback heuristic.")
-        should = is_likely_job_post(cleaned)
+        should = is_likely_job_post(text)
 
     if not should:
         print(f"  → Skipped (not a job post)")
         return
 
-    # Step 3 — Apply ReferJobs brand formatting, then post
-    # (Fix 6: FloodWaitError handled inside post_to_channel)
-    final = format_for_referjobs(cleaned)
-    await post_to_channel(final)
+    # Send post as it is without editing
+    await post_to_channel(text)
 
     # Brief delay to respect Telegram rate limits
     await asyncio.sleep(3)
