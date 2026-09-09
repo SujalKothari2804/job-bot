@@ -87,6 +87,7 @@ def load_state() -> dict:
     """
     defaults = {
         "source1_last_timestamp": 0.0,
+        "source1_last_id": 0,
         "source2_last_id": 0,
     }
     try:
@@ -97,7 +98,7 @@ def load_state() -> dict:
             for key in defaults:
                 if key not in data:
                     data[key] = defaults[key]
-            print(f"[State] Loaded: source1_ts={data['source1_last_timestamp']}, source2_id={data['source2_last_id']}")
+            print(f"[State] Loaded: source1_ts={data.get('source1_last_timestamp')}, source1_id={data.get('source1_last_id')}, source2_id={data.get('source2_last_id')}")
             return data
     except Exception as e:
         print(f"[State] ⚠️  State file corrupt or unreadable ({e}). Using safe defaults.")
@@ -491,23 +492,24 @@ async def queue_worker():
             message_queue.task_done()
 
 
-# ── Source 1: Polling with persistent timestamp (Fix 1, Fix 8) ───────────────
+# ── Source 1: Polling with persistent timestamp and ID tracking ──────────────
 async def poll_source1():
     """
     Poll Source 1 every 60s via get_messages().
-    Fix 1: Timestamp-based tracking persisted to disk.
+    Timestamp + ID tracking persisted to disk.
     Works for private/restricted channels where events don't reliably fire.
     """
     print(f"[Source1] Polling started (every {POLL_INTERVAL_S1}s)")
 
     # Bootstrap: if no saved timestamp, capture current time so we don't reprocess history
-    if state["source1_last_timestamp"] == 0.0:
+    if state.get("source1_last_timestamp", 0.0) == 0.0 and state.get("source1_last_id", 0) == 0:
         try:
             msgs = await userbot.get_messages(SOURCE_CHANNEL_1, limit=1)
             if msgs:
                 state["source1_last_timestamp"] = msgs[0].date.timestamp()
+                state["source1_last_id"] = msgs[0].id
                 save_state(state)
-                print(f"[Source1] Bootstrapped timestamp: {msgs[0].date}")
+                print(f"[Source1] Bootstrapped timestamp: {msgs[0].date}, ID: {msgs[0].id}")
         except Exception as e:
             print(f"[Source1] Could not bootstrap initial timestamp: {e}")
 
@@ -519,29 +521,35 @@ async def poll_source1():
             if not messages:
                 continue
 
-            last_ts = state["source1_last_timestamp"]
+            last_ts = state.get("source1_last_timestamp", 0.0)
+            last_id = state.get("source1_last_id", 0)
+            
             new_messages = [
                 m for m in messages
-                if m.date.timestamp() > last_ts and (m.text or m.caption or "").strip()
+                if (m.id > last_id or m.date.timestamp() >= last_ts) and (m.text or m.caption or "").strip()
             ]
 
-            if not new_messages:
-                print(f"[Source1] No new messages since last poll")
+            # Filter through dedup tracker
+            candidates = [m for m in new_messages if m.id not in processed_ids_set]
+
+            if not candidates:
                 continue
 
             # Process oldest → newest
-            for msg in sorted(new_messages, key=lambda m: m.date):
+            for msg in sorted(candidates, key=lambda m: (m.date, m.id)):
                 text = msg.text or msg.caption or ""
                 if dedup_add(msg.id):
                     await message_queue.put((text, "source1"))
 
-                # Advance timestamp
+                # Advance timestamp and ID
                 ts = msg.date.timestamp()
-                if ts > state["source1_last_timestamp"]:
+                if ts > state.get("source1_last_timestamp", 0.0):
                     state["source1_last_timestamp"] = ts
+                if msg.id > state.get("source1_last_id", 0):
+                    state["source1_last_id"] = msg.id
 
             save_state(state)
-            print(f"[Source1] Queued {len(new_messages)} new message(s)")
+            print(f"[Source1] Queued {len(candidates)} new message(s)")
 
         except Exception as e:
             print(f"[Source1] Poll error: {e}")
